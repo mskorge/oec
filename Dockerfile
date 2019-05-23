@@ -13,6 +13,7 @@ RUN addgroup -S opsgenie && \
     apk update && \
     apk add --no-cache git ca-certificates && \
     update-ca-certificates
+RUN pip install --no-cache-dir requests
 COPY --from=builder /oec /opt/oec
 RUN mkdir -p /var/log/opsgenie && \
     chown -R opsgenie:opsgenie /var/log/opsgenie && \
