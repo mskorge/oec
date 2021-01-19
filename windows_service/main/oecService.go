@@ -31,63 +31,45 @@ type Program struct {
 
 	service service.Service
 	cmd     *exec.Cmd
-
-	exit chan struct{}
 }
 
 func (p *Program) Start(s service.Service) error {
 	p.cmd = exec.Command("cmd", append([]string{"/C", p.OECPath}, p.Args...)...)
 	p.cmd.Env = append(os.Environ(), p.Env...)
 
-	p.exit = make(chan struct{})
-
 	go p.run()
 	return nil
 }
 func (p *Program) run() {
 	logger.Info("Starting ", p.DisplayName)
-	defer func() {
-		if service.Interactive() {
-			p.Stop(p.service)
-		} else {
-			p.service.Stop()
-		}
-	}()
 
 	if p.Stderr != "" {
-		file, err := os.OpenFile(p.Stderr, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
+		stderr, err := os.OpenFile(p.Stderr, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
 		if err != nil {
-			logger.Warningf("Failed to open std err %q: %v", p.Stderr, err)
+			logger.Errorf("Failed to open std err %q: %v", p.Stderr, err)
+			p.service.Stop()
 			return
 		}
-		defer file.Close()
-		p.cmd.Stderr = file
+		defer stderr.Close()
+		p.cmd.Stderr = stderr
 	}
 	if p.Stdout != "" {
-		file, err := os.OpenFile(p.Stdout, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
+		stdout, err := os.OpenFile(p.Stdout, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
 		if err != nil {
-			logger.Warningf("Failed to open std out %q: %v", p.Stdout, err)
+			logger.Errorf("Failed to open std out %q: %v", p.Stdout, err)
+			p.service.Stop()
 			return
 		}
-		defer file.Close()
-		p.cmd.Stdout = file
+		defer stdout.Close()
+		p.cmd.Stdout = stdout
 	}
-
-	unexpectedExit := make(chan struct{})
-	go func() {
-		select {
-		case <-unexpectedExit:
-		case <-p.exit:
-			sendCtrlCEvent(p.cmd.Process.Pid, p.Stderr)
-		}
-	}()
 
 	err := p.cmd.Run()
 	if err != nil {
-		logger.Warningf("Error running: %v", err)
+		logger.Errorf("Failed to run OEC: %v", err)
 	}
 
-	close(unexpectedExit)
+	p.service.Stop()
 	return
 }
 
@@ -106,6 +88,7 @@ func sendCtrlCEvent(pid int, stderr string) {
 	if err != nil {
 		file.Write(errMessageCtrlC("LoadDLL", err))
 	}
+	defer kernel32.Release()
 
 	freeConsole, err := kernel32.FindProc("FreeConsole")
 	if err != nil {
@@ -125,11 +108,11 @@ func sendCtrlCEvent(pid int, stderr string) {
 		file.Write(errMessageCtrlC("AttachConsole", err))
 	}
 
-	setConsoleCtrlHandler, e := kernel32.FindProc("SetConsoleCtrlHandler")
-	if e != nil {
+	setConsoleCtrlHandler, err := kernel32.FindProc("SetConsoleCtrlHandler")
+	if err != nil {
 		file.Write(errMessageCtrlC("FindProc[SetConsoleCtrlHandler]", err))
 	}
-	r, _, e = setConsoleCtrlHandler.Call(0, 1)
+	r, _, err = setConsoleCtrlHandler.Call(0, 1)
 	if r == 0 {
 		file.Write(errMessageCtrlC("SetConsoleCtrlHandler", err))
 	}
@@ -142,20 +125,15 @@ func sendCtrlCEvent(pid int, stderr string) {
 	if r == 0 {
 		file.Write(errMessageCtrlC("GenerateConsoleCtrlEvent", err))
 	}
-
-	r, _, err = freeConsole.Call()
-	if r == 0 {
-		file.Write(errMessageCtrlC("FreeConsole", err))
-	}
-	r, _, e = setConsoleCtrlHandler.Call(0, 0)
-	if r == 0 {
-		file.Write(errMessageCtrlC("SetConsoleCtrlHandler", err))
-	}
 }
 
 func (p *Program) Stop(s service.Service) error {
-	close(p.exit)
-
+	// already terminated ungracefully
+	if p.cmd.ProcessState != nil {
+		return nil
+	}
+	// terminate gracefully
+	sendCtrlCEvent(p.cmd.Process.Pid, p.Stderr)
 	return nil
 }
 
@@ -185,6 +163,28 @@ func getConfig(path string) (*Config, error) {
 		return nil, err
 	}
 	return conf, nil
+}
+
+func validateConfig(config *Config) {
+	if config.Stderr != "" {
+		stderr, err := os.OpenFile(config.Stderr, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
+		if err != nil {
+			log.Fatalf("Failed to open std err %q: %v", config.Stderr, err)
+		}
+		defer stderr.Close()
+	}
+	if config.Stdout != "" {
+		stdout, err := os.OpenFile(config.Stdout, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0777)
+		if err != nil {
+			log.Fatalf("Failed to open std out %q: %v", config.Stdout, err)
+		}
+		defer stdout.Close()
+	}
+
+	_, err := os.Stat(config.OECPath)
+	if err != nil {
+		log.Fatalf("Failed to find OEC executable %q: %v", config.OECPath, err)
+	}
 }
 
 func main() {
@@ -232,6 +232,9 @@ func main() {
 	if len(os.Args) > 1 {
 		action := os.Args[1]
 
+		if action == "start" {
+			validateConfig(config)
+		}
 		err := service.Control(svc, action)
 		if err != nil {
 			if strings.Contains(err.Error(), "Unknown action") {

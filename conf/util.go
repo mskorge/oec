@@ -11,6 +11,7 @@ import (
 	fpath "path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 const unknownFileExtErrMessage = "Unknown configuration file extension[%s]. Only \".json\" and \".yml(.yaml)\" types are allowed."
@@ -27,7 +28,7 @@ func checkFileExtension(filepath string) error {
 	}
 }
 
-func readConfigurationFromFile(filepath string) (*Configuration, error) {
+func readFile(filepath string) (*Configuration, error) {
 
 	file, err := ioutil.ReadFile(filepath)
 	if err != nil {
@@ -91,6 +92,31 @@ func AddRepositoryPathToGitActionFilepaths(mappings ActionMappings, repositories
 			}
 			action.Filepath = fpath.Join(repository.Path, action.Filepath)
 			mappings[index] = action
+		}
+	}
+}
+
+func PrepareLogFormat() logrus.Formatter {
+	formatType := strings.ToLower(os.Getenv("OEC_LOG_FORMAT_TYPE"))
+	switch formatType {
+	case "text":
+		return &logrus.TextFormatter{
+			DisableColors:   true,
+			FullTimestamp:   true,
+			TimestampFormat: time.RFC3339Nano,
+		}
+	case "json":
+		return &logrus.JSONFormatter{
+			TimestampFormat: time.RFC3339Nano,
+		}
+	case "colored":
+		fallthrough
+	default:
+		return &logrus.TextFormatter{
+			ForceColors:            true,
+			FullTimestamp:          true,
+			TimestampFormat:        time.RFC3339Nano,
+			DisableLevelTruncation: true,
 		}
 	}
 }

@@ -1,26 +1,14 @@
 package conf
 
 import (
+	"encoding/json"
 	"github.com/opsgenie/oec/git"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
-	"os"
-	"path/filepath"
+	"net/url"
 	"strings"
 	"time"
 )
-
-const (
-	LocalSourceType = "local"
-	GitSourceType   = "git"
-
-	DefaultBaseUrl = "https://api.opsgenie.com"
-)
-
-var readConfigurationFromGitFunc = readConfigurationFromGit
-var readConfigurationFromLocalFunc = readConfigurationFromLocal
-
-var defaultConfFilepath = filepath.Join("~", "oec", "config.json")
 
 type Configuration struct {
 	ActionSpecifications `yaml:",inline"`
@@ -41,30 +29,118 @@ type ActionSpecifications struct {
 }
 
 type ActionName string
-
 type ActionMappings map[ActionName]MappedAction
 
-func (m ActionMappings) GitActions() []git.GitOptions {
-
-	opts := make([]git.GitOptions, 0)
+func (m ActionMappings) GitActions() []git.Options {
+	opts := make([]git.Options, 0)
 	for _, action := range m {
-		if (action.GitOptions != git.GitOptions{}) {
+		if (action.GitOptions != git.Options{}) {
 			opts = append(opts, action.GitOptions)
 		}
 	}
-
 	return opts
 }
 
 type MappedAction struct {
-	SourceType string         `json:"sourceType" yaml:"sourceType"`
-	GitOptions git.GitOptions `json:"gitOptions" yaml:"gitOptions"`
-	Filepath   string         `json:"filepath" yaml:"filepath"`
-	Flags      Flags          `json:"flags" yaml:"flags"`
-	Args       []string       `json:"args" yaml:"args"`
-	Env        []string       `json:"env" yaml:"env"`
-	Stdout     string         `json:"stdout" yaml:"stdout"`
-	Stderr     string         `json:"stderr" yaml:"stderr"`
+	Type       string      `json:"type" yaml:"type"`
+	SourceType string      `json:"sourceType" yaml:"sourceType"`
+	GitOptions git.Options `json:"gitOptions" yaml:"gitOptions"`
+	Filepath   string      `json:"filepath" yaml:"filepath"`
+	Flags      Flags       `json:"flags" yaml:"flags"`
+	Args       []string    `json:"args" yaml:"args"`
+	Env        []string    `json:"env" yaml:"env"`
+	Stdout     string      `json:"stdout" yaml:"stdout"`
+	Stderr     string      `json:"stderr" yaml:"stderr"`
+}
+type httpFields struct {
+	Url     string            `json:"url" yaml:"url"`
+	Headers map[string]string `json:"headers" yaml:"headers"`
+	Params  map[string]string `json:"params" yaml:"params"`
+	Method  string            `json:"method" yaml:"method"`
+}
+
+func appendHttpFields(action *MappedAction, fields httpFields) error {
+	action.Flags = map[string]string{}
+	if fields.Url != "" {
+		action.Flags["url"] = fields.Url
+	}
+	if fields.Method != "" {
+		action.Flags["method"] = fields.Method
+	}
+	if len(fields.Headers) > 0 {
+		headers, err := json.Marshal(fields.Headers)
+		if err != nil {
+			return err
+		}
+		action.Flags["headers"] = string(headers)
+	}
+	if len(fields.Params) > 0 {
+		params, err := json.Marshal(fields.Params)
+		if err != nil {
+			return err
+		}
+		action.Flags["params"] = string(params)
+	}
+	return nil
+}
+
+func validateHttpFields(fields httpFields) error {
+	methods := map[string]bool{"GET": true, "HEAD": true, "POST": true, "PUT": true, "PATCH": true,
+		"DELETE": true, "CONNECT": true, "OPTIONS": true, "TRACE": true}
+	if fields.Method != "" && !methods[strings.ToUpper(fields.Method)] {
+		return errors.New("Http method is not valid: [" + fields.Method + "].")
+	}
+	if _, err := url.Parse(fields.Url); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (action *MappedAction) UnmarshalJSON(b []byte) error {
+	type mappedAction MappedAction
+	err := json.Unmarshal(b, (*mappedAction)(action))
+	if err != nil {
+		return err
+	}
+	if action.Type == "http" {
+		fields := httpFields{}
+		if err = json.Unmarshal(b, &fields); err != nil {
+			return err
+		}
+		if err := validateHttpFields(fields); err != nil {
+			return err
+		}
+		if err = appendHttpFields(action, fields); err != nil {
+			return err
+		}
+	} else if action.Type == "" {
+		action.Type = "custom"
+	}
+	return nil
+}
+
+func (action *MappedAction) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	type mappedAction MappedAction
+	err := unmarshal((*mappedAction)(action))
+	if err != nil {
+		return err
+	}
+	if action.Type == "http" {
+		fields := httpFields{}
+		if err = unmarshal(&fields); err != nil {
+			return err
+		}
+		if err := validateHttpFields(fields); err != nil {
+			return err
+		}
+		if err = appendHttpFields(action, fields); err != nil {
+			return err
+		}
+	} else if action.Type == "" {
+		action.Type = "custom"
+	}
+
+	return nil
 }
 
 type Flags map[string]string
@@ -92,114 +168,4 @@ type PoolConf struct {
 	QueueSize                int32         `json:"queueSize" yaml:"queueSize"`
 	KeepAliveTimeInMillis    time.Duration `json:"keepAliveTimeInMillis" yaml:"keepAliveTimeInMillis"`
 	MonitoringPeriodInMillis time.Duration `json:"monitoringPeriodInMillis" yaml:"monitoringPeriodInMillis"`
-}
-
-func ReadConfFile() (*Configuration, error) {
-
-	confSourceType := os.Getenv("OEC_CONF_SOURCE_TYPE")
-	conf, err := readConfFileFromSource(strings.ToLower(confSourceType))
-	if err != nil {
-		return nil, err
-	}
-
-	err = validateConfiguration(conf)
-	if err != nil {
-		return nil, err
-	}
-
-	addHomeDirPrefixToActionMappings(conf.ActionMappings)
-	chmodLocalActions(conf.ActionMappings, 0700)
-
-	conf.addDefaultFlags()
-
-	return conf, nil
-}
-
-func (c *Configuration) addDefaultFlags() {
-	c.GlobalArgs = append(
-		[]string{
-			"-apiKey", c.ApiKey,
-			"-opsgenieUrl", c.BaseUrl,
-			"-logLevel", strings.ToUpper(c.LogLevel),
-		},
-		c.GlobalArgs...,
-	)
-}
-
-func validateConfiguration(conf *Configuration) error {
-
-	if conf == nil || conf == (&Configuration{}) {
-		return errors.New("The configuration is empty.")
-	}
-	if conf.ApiKey == "" {
-		return errors.New("ApiKey is not found in the configuration file.")
-	}
-	if conf.BaseUrl == "" {
-		conf.BaseUrl = DefaultBaseUrl
-		logrus.Infof("BaseUrl is not found in the configuration file, default url[%s] is set.", DefaultBaseUrl)
-	}
-
-	if len(conf.ActionMappings) == 0 {
-		return errors.New("Action mappings configuration is not found in the configuration file.")
-	} else {
-		for actionName, action := range conf.ActionMappings {
-			if action.SourceType != LocalSourceType &&
-				action.SourceType != GitSourceType {
-				return errors.Errorf("Action source type of action[%s] should be either local or git.", actionName)
-			} else {
-				if action.Filepath == "" {
-					return errors.Errorf("Filepath of action[%s] is empty.", actionName)
-				}
-				if action.SourceType == GitSourceType &&
-					action.GitOptions == (git.GitOptions{}) {
-					return errors.Errorf("Git options of action[%s] is empty.", actionName)
-				}
-			}
-		}
-	}
-
-	level, err := logrus.ParseLevel(conf.LogLevel)
-	if err != nil {
-		conf.LogrusLevel = logrus.InfoLevel
-		conf.LogLevel = "info"
-	} else {
-		conf.LogrusLevel = level
-	}
-
-	return nil
-}
-
-func readConfFileFromSource(confSourceType string) (*Configuration, error) {
-
-	switch confSourceType {
-	case GitSourceType:
-		url := os.Getenv("OEC_CONF_GIT_URL")
-		privateKeyFilepath := os.Getenv("OEC_CONF_GIT_PRIVATE_KEY_FILEPATH")
-		passphrase := os.Getenv("OEC_CONF_GIT_PASSPHRASE")
-		confFilepath := os.Getenv("OEC_CONF_GIT_FILEPATH")
-
-		if privateKeyFilepath != "" {
-			privateKeyFilepath = addHomeDirPrefix(privateKeyFilepath)
-		}
-
-		if confFilepath == "" {
-			return nil, errors.New("Git configuration filepath could not be empty.")
-		}
-
-		return readConfigurationFromGitFunc(url, privateKeyFilepath, passphrase, confFilepath)
-	case LocalSourceType:
-		confFilepath := os.Getenv("OEC_CONF_LOCAL_FILEPATH")
-
-		if len(confFilepath) <= 0 {
-			confFilepath = addHomeDirPrefix(defaultConfFilepath)
-		} else {
-			confFilepath = addHomeDirPrefix(confFilepath)
-		}
-
-		return readConfigurationFromLocalFunc(confFilepath)
-	case "":
-		return nil, errors.Errorf("OEC_CONF_SOURCE_TYPE should be set as \"local\" or \"git\".")
-	default:
-		return nil, errors.Errorf("Unknown configuration source type[%s], valid types are \"local\" and \"git\".", confSourceType)
-	}
 }
