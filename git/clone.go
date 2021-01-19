@@ -1,14 +1,14 @@
 package git
 
 import (
-	"gopkg.in/src-d/go-git.v4"
-	"gopkg.in/src-d/go-git.v4/plumbing"
-	"gopkg.in/src-d/go-git.v4/plumbing/transport/ssh"
+	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/plumbing"
+	"github.com/go-git/go-git/v5/plumbing/transport/ssh"
 	"io/ioutil"
 	"os"
 )
 
-var gitCloneMasterFunc = gitCloneMaster
+var cloneMasterFunc = cloneMaster
 
 const repositoryDirPrefix = "oec"
 
@@ -19,7 +19,7 @@ func CloneMaster(url, privateKeyFilepath, passPhrase string) (repositoryPath str
 		return "", err
 	}
 
-	err = gitCloneMasterFunc(tmpDir, url, privateKeyFilepath, passPhrase)
+	err = cloneMasterFunc(tmpDir, url, privateKeyFilepath, passPhrase)
 	if err != nil {
 		os.RemoveAll(tmpDir)
 		return "", err
@@ -28,7 +28,7 @@ func CloneMaster(url, privateKeyFilepath, passPhrase string) (repositoryPath str
 	return tmpDir, nil
 }
 
-func gitCloneMaster(tmpDir, gitUrl, privateKeyFilepath, passPhrase string) error {
+func cloneMaster(tmpDir, gitUrl, privateKeyFilepath, passPhrase string) error {
 
 	options := &git.CloneOptions{
 		URL:               gitUrl,

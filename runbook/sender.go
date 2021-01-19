@@ -10,11 +10,28 @@ import (
 	"strconv"
 )
 
-const resultPath = "/v2/integrations/oec/actionExecutionResult"
+const resultPath = "/v1/oec/callback"
 
 var SendResultToOpsGenieFunc = SendResultToOpsGenie
 
 var client = &retryer.Retryer{}
+
+type ActionResultPayload struct {
+	RequestId      string `json:"requestId,omitempty"`
+	IsSuccessful   bool   `json:"isSuccessful,omitempty"`
+	EntityId       string `json:"entityId,omitempty"`
+	EntityType     string `json:"entityType,omitempty"`
+	Action         string `json:"action,omitempty"`
+	ActionType     string `json:"actionType,omitempty"`
+	FailureMessage string `json:"failureMessage,omitempty"`
+	*HttpResponse
+}
+
+type HttpResponse struct {
+	Headers    map[string]string `json:"headers"`
+	Body       string            `json:"body"`
+	StatusCode int               `json:"statusCode"`
+}
 
 func SendResultToOpsGenie(resultPayload *ActionResultPayload, apiKey, baseUrl string) error {
 
@@ -25,7 +42,7 @@ func SendResultToOpsGenie(resultPayload *ActionResultPayload, apiKey, baseUrl st
 
 	resultUrl := baseUrl + resultPath
 
-	request, err := retryer.NewRequest("POST", resultUrl, bytes.NewReader(body))
+	request, err := retryer.NewRequest(http.MethodPost, resultUrl, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
